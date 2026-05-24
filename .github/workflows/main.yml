@@ -1,277 +1,185 @@
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║          ZIP → MARKDOWN BUNDLER  —  GitHub Actions Workflow            ║
+# ║          ZIP → MARKDOWN BUNDLER  —  GitHub Actions Workflow  v3.1      ║
 # ║                                                                        ║
-# ║  HOW TO USE (one-time setup):                                          ║
-# ║    1. Place THIS file at:  .github/workflows/bundle.yml                ║
-# ║    2. Place zip_bundler.py at the root of your repo                    ║
-# ║    3. Upload your project as   *.zip   to the root of your repo        ║
-# ║    4. git add . && git commit -m "add project" && git push             ║
-# ║    5. Go to Actions tab → watch it run → download your .md             ║
-# ║                                                                        ║
-# ║  TRIGGERS:                                                             ║
-# ║    • Any push to main / master / develop                               ║
-# ║    • Any new or changed .zip file pushed                               ║
-# ║    • Manual "Run workflow" button in Actions tab                       ║
+# ║  SETUP (one-time):                                                     ║
+# ║    1. This file  →  .github/workflows/bundle.yml                       ║
+# ║    2. zip_bundler.py  →  repo root                                     ║
+# ║    3. yourproject.zip  →  repo root                                    ║
+# ║    4. git add . && git commit -m "setup" && git push                   ║
+# ║    5. Actions tab → watch run → Summary → download link                ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-
+ 
 name: "📦 ZIP → Markdown Bundler"
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  TRIGGERS
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 on:
   push:
     branches:
       - main
       - master
       - develop
-    paths:
-      - "**.zip"          # re-run when any zip changes
-      - "zip_bundler.py"  # re-run when the script changes
-      - ".github/workflows/bundle.yml"  # re-run when this file changes
-
-  workflow_dispatch:      # Manual trigger from Actions tab
+ 
+  workflow_dispatch:
     inputs:
       zip_filename:
-        description: "ZIP filename (leave blank = auto-detect)"
+        description: "ZIP filename (blank = auto-detect first .zip in root)"
         required: false
         default: ""
       output_filename:
         description: "Output .md filename"
         required: false
         default: "project_codebase.md"
-      commit_output:
-        description: "Commit output .md back to repo?"
-        type: boolean
-        required: false
-        default: true
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  GLOBAL ENV
-# ─────────────────────────────────────────────────────────────────────────────
-env:
-  OUTPUT_FILE:    "project_codebase.md"
-  BUNDLER_SCRIPT: "zip_bundler.py"
-  PYTHON_VERSION: "3.11"
-  ARTIFACT_NAME:  "codebase-bundle"
-  RETENTION_DAYS: "30"
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PERMISSIONS  (need write to commit the .md back)
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 permissions:
   contents: write
   pull-requests: write
-  actions: read
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  JOBS
-# ─────────────────────────────────────────────────────────────────────────────
+ 
 jobs:
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  JOB 1 — validate inputs & detect zip file
-  # ═══════════════════════════════════════════════════════════════════════════
-  detect:
-    name: "🔍 Detect ZIP File"
+  bundle:
+    name: "📦 Detect → Bundle → Upload → Summarise"
     runs-on: ubuntu-latest
-
-    outputs:
-      zip_found:    ${{ steps.finder.outputs.zip_found }}
-      zip_name:     ${{ steps.finder.outputs.zip_name }}
-      output_file:  ${{ steps.finder.outputs.output_file }}
-
+ 
     steps:
+ 
       - name: "📥 Checkout Repository"
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-
-      - name: "🔍 Find ZIP File"
-        id: finder
+          fetch-depth: 0
+ 
+      # NOTE: no  cache: "pip"  — that option crashes when the repo has no
+      # requirements.txt or pyproject.toml (which is the case here).
+      - name: "🐍 Set up Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+ 
+      - name: "🔍 Detect ZIP File"
+        id: detect
         shell: bash
         run: |
-          # ── resolve output filename ────────────────────────────────────────
+          # resolve output filename
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && \
                 -n "${{ inputs.output_filename }}" ]]; then
             OUTPUT_FILE="${{ inputs.output_filename }}"
           else
-            OUTPUT_FILE="${{ env.OUTPUT_FILE }}"
+            OUTPUT_FILE="project_codebase.md"
           fi
-          echo "output_file=${OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
-
-          # ── resolve zip filename ───────────────────────────────────────────
+ 
+          # resolve zip filename
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && \
                 -n "${{ inputs.zip_filename }}" ]]; then
-            ZIP="${{ inputs.zip_filename }}"
-            if [[ ! -f "$ZIP" ]]; then
-              echo "::error::Specified ZIP not found: $ZIP"
-              exit 1
-            fi
-            echo "zip_found=true"   >> "$GITHUB_OUTPUT"
-            echo "zip_name=${ZIP}"  >> "$GITHUB_OUTPUT"
+            ZIP_NAME="${{ inputs.zip_filename }}"
           else
-            # Auto-detect: first .zip in root
-            ZIP=$(find . -maxdepth 1 -name "*.zip" | sort | head -1)
-            if [[ -z "$ZIP" ]]; then
-              echo "::warning::No .zip file found in repository root."
-              echo "zip_found=false" >> "$GITHUB_OUTPUT"
-              echo "zip_name="       >> "$GITHUB_OUTPUT"
-            else
-              ZIP_NAME="${ZIP#./}"
-              echo "zip_found=true"        >> "$GITHUB_OUTPUT"
-              echo "zip_name=${ZIP_NAME}"  >> "$GITHUB_OUTPUT"
-              echo "✅ Found ZIP: ${ZIP_NAME}"
-            fi
+            ZIP_NAME=$(find . -maxdepth 1 -name "*.zip" -printf "%f\n" \
+                       2>/dev/null | sort | head -1)
           fi
-
-      - name: "❌ Fail if no ZIP found"
-        if: steps.finder.outputs.zip_found == 'false'
-        run: |
-          echo "::error::No ZIP file found. Please upload a .zip to the repository root."
-          echo ""
-          echo "Expected structure:"
-          echo "  your-repo/"
-          echo "  ├── .github/workflows/bundle.yml   ← this file"
-          echo "  ├── zip_bundler.py                 ← bundler script"
-          echo "  └── yourproject.zip                ← your project ZIP  ← MISSING"
-          exit 1
-
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  JOB 2 — run the bundler
-  # ═══════════════════════════════════════════════════════════════════════════
-  bundle:
-    name: "⚙️ Bundle Codebase"
-    runs-on: ubuntu-latest
-    needs: detect
-    if: needs.detect.outputs.zip_found == 'true'
-
-    outputs:
-      md_size:   ${{ steps.stats.outputs.md_size }}
-      md_lines:  ${{ steps.stats.outputs.md_lines }}
-      src_files: ${{ steps.stats.outputs.src_files }}
-
-    steps:
-      # ── 1. Checkout ─────────────────────────────────────────────────────────
-      - name: "📥 Checkout Repository"
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0    # full history needed for push back
-
-      # ── 2. Python ───────────────────────────────────────────────────────────
-      - name: "🐍 Set up Python ${{ env.PYTHON_VERSION }}"
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      # ── 3. Verify bundler script exists ─────────────────────────────────────
-      - name: "📋 Verify Bundler Script"
-        run: |
-          if [[ ! -f "${{ env.BUNDLER_SCRIPT }}" ]]; then
-            echo "::error::Bundler script not found: ${{ env.BUNDLER_SCRIPT }}"
+ 
+          if [[ -z "$ZIP_NAME" ]]; then
+            echo "::error::No .zip found in the repository root."
             echo ""
-            echo "Make sure zip_bundler.py is in the root of your repository."
+            echo "Your repo must contain:"
+            echo "  ├── .github/workflows/bundle.yml   <- this file"
+            echo "  ├── zip_bundler.py                 <- bundler script"
+            echo "  └── yourproject.zip                <- YOUR zip  <- MISSING"
             exit 1
           fi
-          echo "✅ Bundler script found: ${{ env.BUNDLER_SCRIPT }}"
+ 
+          if [[ ! -f "$ZIP_NAME" ]]; then
+            echo "::error::ZIP specified but not found on disk: $ZIP_NAME"
+            exit 1
+          fi
+ 
+          ZIP_SIZE=$(du -sh "$ZIP_NAME" | cut -f1)
+          echo "ZIP found  : $ZIP_NAME  ($ZIP_SIZE)"
+          echo "Output file: $OUTPUT_FILE"
+ 
+          echo "zip_name=${ZIP_NAME}"       >> "$GITHUB_OUTPUT"
+          echo "output_file=${OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
+ 
+      - name: "📋 Verify zip_bundler.py"
+        shell: bash
+        run: |
+          if [[ ! -f "zip_bundler.py" ]]; then
+            echo "::error::zip_bundler.py not found in the repository root."
+            exit 1
+          fi
+          echo "zip_bundler.py found."
           python --version
-
-      # ── 4. Run bundler ──────────────────────────────────────────────────────
+ 
       - name: "🚀 Run Bundler"
         id: run_bundler
+        shell: bash
         env:
-          ZIP_NAME:    ${{ needs.detect.outputs.zip_name }}
-          OUTPUT_FILE: ${{ needs.detect.outputs.output_file }}
+          ZIP_NAME:    ${{ steps.detect.outputs.zip_name }}
+          OUTPUT_FILE: ${{ steps.detect.outputs.output_file }}
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  ZIP     : $ZIP_NAME"
-          echo "  Output  : $OUTPUT_FILE"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-          python "${{ env.BUNDLER_SCRIPT }}" "$ZIP_NAME" "$OUTPUT_FILE"
-          
+          echo "ZIP    : $ZIP_NAME"
+          echo "Output : $OUTPUT_FILE"
+          python zip_bundler.py "$ZIP_NAME" "$OUTPUT_FILE"
+ 
           if [[ ! -f "$OUTPUT_FILE" ]]; then
-            echo "::error::Bundler completed but output file not found: $OUTPUT_FILE"
+            echo "::error::Bundler ran but output file not created: $OUTPUT_FILE"
             exit 1
           fi
-          
-          echo "✅ Output file created: $OUTPUT_FILE"
-          echo "output_path=${OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
-
-      # ── 5. Collect stats ────────────────────────────────────────────────────
+          echo "Output created: $OUTPUT_FILE"
+ 
       - name: "📊 Collect Statistics"
         id: stats
+        shell: bash
         env:
-          OUTPUT_FILE: ${{ needs.detect.outputs.output_file }}
+          OUTPUT_FILE: ${{ steps.detect.outputs.output_file }}
         run: |
           MD_SIZE=$(du -sh "$OUTPUT_FILE" | cut -f1)
           MD_LINES=$(wc -l < "$OUTPUT_FILE")
           SRC_FILES=$(grep -c "^### \[" "$OUTPUT_FILE" 2>/dev/null || echo "0")
-          
-          echo "md_size=${MD_SIZE}"     >> "$GITHUB_OUTPUT"
-          echo "md_lines=${MD_LINES}"   >> "$GITHUB_OUTPUT"
-          echo "src_files=${SRC_FILES}" >> "$GITHUB_OUTPUT"
-          
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  .md size    : $MD_SIZE"
-          echo "  .md lines   : $MD_LINES"
-          echo "  source files: $SRC_FILES"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-      # ── 6. Upload as artifact ───────────────────────────────────────────────
+ 
+          echo "md_size=${MD_SIZE}"       >> "$GITHUB_OUTPUT"
+          echo "md_lines=${MD_LINES}"     >> "$GITHUB_OUTPUT"
+          echo "src_files=${SRC_FILES}"   >> "$GITHUB_OUTPUT"
+ 
+          echo ".md size     : $MD_SIZE"
+          echo ".md lines    : $MD_LINES"
+          echo "source files : $SRC_FILES"
+ 
       - name: "📤 Upload Artifact"
         uses: actions/upload-artifact@v4
         with:
-          name:           ${{ env.ARTIFACT_NAME }}
-          path:           ${{ needs.detect.outputs.output_file }}
-          retention-days: ${{ env.RETENTION_DAYS }}
+          name:              codebase-bundle
+          path:              ${{ steps.detect.outputs.output_file }}
+          retention-days:    30
           if-no-files-found: error
-
-      # ── 7. Commit .md back to repo ──────────────────────────────────────────
+ 
       - name: "💾 Commit Output to Repository"
-        if: |
-          github.event_name != 'pull_request' &&
-          (github.event_name != 'workflow_dispatch' || inputs.commit_output == 'true')
+        shell: bash
         env:
-          OUTPUT_FILE: ${{ needs.detect.outputs.output_file }}
-          ZIP_NAME:    ${{ needs.detect.outputs.zip_name }}
+          OUTPUT_FILE: ${{ steps.detect.outputs.output_file }}
+          ZIP_NAME:    ${{ steps.detect.outputs.zip_name }}
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
-          # Stage output file (and summary if it exists)
-          git add "$OUTPUT_FILE" 2>/dev/null || true
-          
-          # Only commit if there are actual changes
+          git add "$OUTPUT_FILE"
           if git diff --staged --quiet; then
-            echo "ℹ️  No changes in output — skipping commit."
+            echo "No changes in output - skipping commit."
           else
-            git commit -m "📦 auto: bundle ${ZIP_NAME} → ${OUTPUT_FILE} [skip ci]" \
-                       -m "Generated by github-actions[bot] at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            git commit \
+              -m "auto-bundle: ${ZIP_NAME} -> ${OUTPUT_FILE} [skip ci]" \
+              -m "Generated by github-actions[bot] at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
             git push origin HEAD
-            echo "✅ Committed and pushed: $OUTPUT_FILE"
+            echo "Committed and pushed: $OUTPUT_FILE"
           fi
-
-      # ── 8. Comment on PR ────────────────────────────────────────────────────
+ 
       - name: "💬 Comment on Pull Request"
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
-          OUTPUT_FILE: ${{ needs.detect.outputs.output_file }}
-          ZIP_NAME:    ${{ needs.detect.outputs.zip_name }}
+          OUTPUT_FILE: ${{ steps.detect.outputs.output_file }}
+          ZIP_NAME:    ${{ steps.detect.outputs.zip_name }}
           MD_SIZE:     ${{ steps.stats.outputs.md_size }}
           MD_LINES:    ${{ steps.stats.outputs.md_lines }}
           SRC_FILES:   ${{ steps.stats.outputs.src_files }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const body = `## 📦 Codebase Bundle Generated
-            
-            Your project ZIP was bundled successfully!
-            
+            const body = `## Codebase Bundle Generated
             | Metric | Value |
             |--------|-------|
             | Source ZIP | \`${process.env.ZIP_NAME}\` |
@@ -279,42 +187,22 @@ jobs:
             | Output Size | ${process.env.MD_SIZE} |
             | Total Lines | ${process.env.MD_LINES} |
             | Source Files | ${process.env.SRC_FILES} |
-            
-            ### ⬇️ Download
-            The bundled \`.md\` file is available in the **[Artifacts](${context.payload.pull_request.html_url}/checks)** section of this workflow run.
-            
-            ### 🤖 Upload to AI
-            Download \`${process.env.OUTPUT_FILE}\` and upload to:
-            - [Google AI Studio](https://aistudio.google.com/)
-            - [Claude.ai](https://claude.ai/)
-            - [ChatGPT](https://chat.openai.com/)
-            `;
-            
+            Download the .md from the **Artifacts** section of this run.`;
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
-              owner:        context.repo.owner,
-              repo:         context.repo.repo,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
               body,
             });
-
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  #  JOB 3 — write workflow summary with download links
-  # ═══════════════════════════════════════════════════════════════════════════
-  summary:
-    name: "📋 Generate Summary"
-    runs-on: ubuntu-latest
-    needs: [detect, bundle]
-    if: always() && needs.bundle.result == 'success'
-
-    steps:
+ 
       - name: "📋 Write Step Summary"
+        shell: bash
         env:
-          ZIP_NAME:    ${{ needs.detect.outputs.zip_name }}
-          OUTPUT_FILE: ${{ needs.detect.outputs.output_file }}
-          MD_SIZE:     ${{ needs.bundle.outputs.md_size }}
-          MD_LINES:    ${{ needs.bundle.outputs.md_lines }}
-          SRC_FILES:   ${{ needs.bundle.outputs.src_files }}
+          OUTPUT_FILE: ${{ steps.detect.outputs.output_file }}
+          ZIP_NAME:    ${{ steps.detect.outputs.zip_name }}
+          MD_SIZE:     ${{ steps.stats.outputs.md_size }}
+          MD_LINES:    ${{ steps.stats.outputs.md_lines }}
+          SRC_FILES:   ${{ steps.stats.outputs.src_files }}
           REPO:        ${{ github.repository }}
           BRANCH:      ${{ github.ref_name }}
           RUN_ID:      ${{ github.run_id }}
@@ -322,66 +210,43 @@ jobs:
           DIRECT_URL="https://github.com/${REPO}/blob/${BRANCH}/${OUTPUT_FILE}"
           RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${OUTPUT_FILE}"
           ARTIFACT_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
-
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          # 📦 ZIP → Markdown Bundle — Complete!
-
-          ## ✅ Result
-
-          | | |
-          |-|-|
-          | **Status** | ✅ Success |
-          | **Source ZIP** | \`${ZIP_NAME}\` |
-          | **Output File** | \`${OUTPUT_FILE}\` |
-          | **Output Size** | ${MD_SIZE} |
-          | **Total Lines** | ${MD_LINES} |
-          | **Source Files** | ${SRC_FILES} |
-          | **Branch** | \`${BRANCH}\` |
-          | **Run ID** | \`${RUN_ID}\` |
-
-          ---
-
-          ## ⬇️ Download Your Bundle
-
-          ### Option 1 — Direct File in Repo (committed automatically)
-          **[🔗 View file in GitHub](${DIRECT_URL})**
-
-          To download raw:
-          \`\`\`
-          curl -L "${RAW_URL}" -o ${OUTPUT_FILE}
-          \`\`\`
-          Or right-click → Save As on the raw link:
-          **[📥 Raw file download](${RAW_URL})**
-
-          ### Option 2 — Workflow Artifact (available 30 days)
-          **[📦 Go to this workflow run → scroll to Artifacts](${ARTIFACT_URL})**
-
-          Click **"codebase-bundle"** → Download ZIP → extract → use the \`.md\` file.
-
-          ---
-
-          ## 🤖 Upload to AI Platforms
-
-          1. Download \`${OUTPUT_FILE}\` using either method above
-          2. Go to your AI platform:
-             - **[Google AI Studio](https://aistudio.google.com/)** — click Upload → select the .md
-             - **[Claude.ai](https://claude.ai/)** — attach file in conversation
-             - **[ChatGPT](https://chat.openai.com/)** — attach file (GPT-4 required)
-          3. Ask for: code review, refactoring, documentation, security audit, etc.
-
-          ---
-
-          ## 📁 How To Re-Run
-
-          To re-bundle after updating your ZIP:
-          \`\`\`bash
-          # Just push the new zip — action runs automatically
-          git add yourproject.zip
-          git commit -m "update project"
-          git push
-          \`\`\`
-
-          Or click **"Run workflow"** manually in the Actions tab.
-          EOF
-
-          echo "✅ Summary written."
+ 
+          {
+            echo "# ZIP to Markdown Bundle - Complete"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Status | Success |"
+            echo "| Source ZIP | \`${ZIP_NAME}\` |"
+            echo "| Output File | \`${OUTPUT_FILE}\` |"
+            echo "| Output Size | ${MD_SIZE} |"
+            echo "| Total Lines | ${MD_LINES} |"
+            echo "| Source Files | ${SRC_FILES} |"
+            echo "| Branch | \`${BRANCH}\` |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## Download Your Bundle"
+            echo ""
+            echo "### Way 1 - Artifact (30 days)"
+            echo "[Click here - scroll to bottom - download codebase-bundle](${ARTIFACT_URL})"
+            echo ""
+            echo "### Way 2 - Raw file in repo"
+            echo "[Direct raw download - right-click Save As](${RAW_URL})"
+            echo ""
+            echo "\`\`\`bash"
+            echo "curl -L \"${RAW_URL}\" -o ${OUTPUT_FILE}"
+            echo "\`\`\`"
+            echo ""
+            echo "### Way 3 - View in GitHub"
+            echo "[View file in repo](${DIRECT_URL}) then click Raw button then Ctrl+S"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## Upload to AI"
+            echo ""
+            echo "1. Download \`${OUTPUT_FILE}\` using any method above"
+            echo "2. Upload to Google AI Studio / Claude.ai / ChatGPT"
+          } >> "$GITHUB_STEP_SUMMARY"
+ 
+          echo "Summary written."
